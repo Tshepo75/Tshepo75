@@ -1,0 +1,127 @@
+pip install alpaca-trade-api pandas numpy
+
+api_key: 'your_api_key'
+api_secret: 'your_api_secret'
+base_url: 'https://paper-api.alpaca.markets'
+symbol: 'AAPL'
+short_window: 40
+long_window: 100
+risk_capital: 10000
+stop_loss_pct: 0.01
+take_profit_pct: 0.02
+
+import alpaca_trade_api as tradeapi
+import pandas as pd
+import numpy as np
+import time
+from datetime import datetime, timedelta
+import logging
+import yaml
+
+# Load configuration
+with open('config.yaml', 'r') as file:
+    config = yaml.safe_load(file)
+
+# Initialize logging
+logging.basicConfig(filename='trading_bot.log', level=logging.INFO,
+                    format='%(asctime)s:%(levelname)s:%(message)s')
+
+# Initialize API
+api = tradeapi.REST(config['api_key'], config['api_secret'], config['base_url'], api_version='v2')
+
+# Define trading parameters
+symbol = config['symbol']
+short_window = config['short_window']
+long_window = config['long_window']
+risk_capital = config['risk_capital']
+stop_loss_pct = config['stop_loss_pct']
+take_profit_pct = config['take_profit_pct']
+
+def get_historical_data(symbol, start, end):
+    try:
+        barset = api.get_barset(symbol, 'minute', start=start, end=end, limit=1000)
+        return barset[symbol]
+    except Exception as e:
+        logging.error(f"Error fetching historical data: {e}")
+        return None
+
+def generate_signals(data):
+    data['short_mavg'] = data['close'].rolling(window=short_window, min_periods=1).mean()
+    data['long_mavg'] = data['close'].rolling(window=long_window, min_periods=1).mean()
+    data['signal'] = 0.0
+    data['signal'][short_window:] = np.where(data['short_mavg'][short_window:] > data['long_mavg'][short_window:], 1.0, 0.0)
+    data['positions'] = data['signal'].diff()
+    return data
+
+def calculate_order_quantity(current_price):
+    return int(risk_capital / current_price)
+
+def execute_trade(signals):
+    current_price = signals['close'].iloc[-1]
+    position = None
+    try:
+        position = api.get_position(symbol)
+    except:
+        pass
+
+    if signals['positions'].iloc[-1] == 1.0:
+        if not position:
+            qty = calculate_order_quantity(current_price)
+            try:
+                api.submit_order(
+                    symbol=symbol,
+                    qty=qty,
+                    side='buy',
+                    type='market',
+                    time_in_force='gtc',
+                    order_class='bracket',
+                    stop_loss={'stop_price': current_price * (1 - stop_loss_pct)},
+                    take_profit={'limit_price': current_price * (1 + take_profit_pct)}
+                )
+                logging.info(f"Bought {qty} shares of {symbol} at {current_price}")
+            except Exception as e:
+                logging.error(f"Error placing buy order: {e}")
+    elif signals['positions'].iloc[-1] == -1.0:
+        if position:
+            qty = position.qty
+            try:
+                api.submit_order(
+                    symbol=symbol,
+                    qty=qty,
+                    side='sell',
+                    type='market',
+                    time_in_force='gtc'
+                )
+                logging.info(f"Sold {qty} shares of {symbol} at {current_price}")
+            except Exception as e:
+                logging.error(f"Error placing sell order: {e}")
+
+def main():
+    while True:
+        try:
+            end_date = datetime.now().isoformat()
+            start_date = (datetime.now() - timedelta(days=1)).isoformat()
+
+            # Get historical data
+            data = get_historical_data(symbol, start_date, end_date)
+            if data is None:
+                continue
+
+            data = pd.DataFrame({
+                'close': [bar.c for bar in data],
+                'date': [bar.t for bar in data]
+            }).set_index('date')
+
+            # Generate signals
+            signals = generate_signals(data)
+
+            # Execute trades based on signals
+            execute_trade(signals)
+
+            # Wait for 5 seconds before next iteration
+            time.sleep(5)
+        except Exception as e:
+            logging.error(f"Error in main loop: {e}")
+
+if __name__ == "__main__":
+    main()
