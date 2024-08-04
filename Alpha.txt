@@ -1,127 +1,95 @@
-pip install alpaca-trade-api pandas numpy
-
-api_key: 'your_api_key'
-api_secret: 'your_api_secret'
-base_url: 'https://paper-api.alpaca.markets'
-symbol: 'AAPL'
-short_window: 40
-long_window: 100
-risk_capital: 10000
-stop_loss_pct: 0.01
-take_profit_pct: 0.02
-
-import alpaca_trade_api as tradeapi
 import pandas as pd
 import numpy as np
-import time
-from datetime import datetime, timedelta
-import logging
-import yaml
+import yfinance as yf
 
-# Load configuration
-with open('config.yaml', 'r') as file:
-    config = yaml.safe_load(file)
+# Fetch historical data
+def fetch_data(ticker, start_date, end_date):
+    df = yf.download(ticker, start=start_date, end=end_date)
+    return df
 
-# Initialize logging
-logging.basicConfig(filename='trading_bot.log', level=logging.INFO,
-                    format='%(asctime)s:%(levelname)s:%(message)s')
+# Calculate Adaptive Moving Averages
+def calculate_adaptive_moving_averages(df, short_window=20, long_window=50):
+    df['EMA_Short'] = df['Close'].ewm(span=short_window, adjust=False).mean()
+    df['EMA_Long'] = df['Close'].ewm(span=long_window, adjust=False).mean()
+    return df
 
-# Initialize API
-api = tradeapi.REST(config['api_key'], config['api_secret'], config['base_url'], api_version='v2')
+# Calculate Volatility
+def calculate_volatility(df, window=20):
+    df['Volatility'] = df['Close'].rolling(window=window).std()
+    return df
 
-# Define trading parameters
-symbol = config['symbol']
-short_window = config['short_window']
-long_window = config['long_window']
-risk_capital = config['risk_capital']
-stop_loss_pct = config['stop_loss_pct']
-take_profit_pct = config['take_profit_pct']
+# Trading Strategy with Enhanced Features
+def enhanced_trading_strategy(df, initial_account_size=100000, stop_loss_factor=1.5, base_lot_size=0.01, transaction_cost_pct=0.001, slippage_pct=0.001, max_drawdown_pct=0.2):
+    df = calculate_adaptive_moving_averages(df)
+    df = calculate_volatility(df)
+    
+    # Initialize trading variables
+    account_balance = initial_account_size
+    position_size = 0
+    entry_price = 0
+    stop_loss = 0
+    trade_status = "No Position"
+    trade_results = []
+    max_balance = initial_account_size
 
-def get_historical_data(symbol, start, end):
-    try:
-        barset = api.get_barset(symbol, 'minute', start=start, end=end, limit=1000)
-        return barset[symbol]
-    except Exception as e:
-        logging.error(f"Error fetching historical data: {e}")
-        return None
+    for i in range(len(df)):
+        # Dynamic Position Sizing
+        position_size = account_balance * base_lot_size / df['Close'][i]
+        
+        # Check for max drawdown
+        if account_balance < max_balance * (1 - max_drawdown_pct):
+            print("Maximum drawdown reached. Ending trading.")
+            break
 
-def generate_signals(data):
-    data['short_mavg'] = data['close'].rolling(window=short_window, min_periods=1).mean()
-    data['long_mavg'] = data['close'].rolling(window=long_window, min_periods=1).mean()
-    data['signal'] = 0.0
-    data['signal'][short_window:] = np.where(data['short_mavg'][short_window:] > data['long_mavg'][short_window:], 1.0, 0.0)
-    data['positions'] = data['signal'].diff()
-    return data
-
-def calculate_order_quantity(current_price):
-    return int(risk_capital / current_price)
-
-def execute_trade(signals):
-    current_price = signals['close'].iloc[-1]
-    position = None
-    try:
-        position = api.get_position(symbol)
-    except:
-        pass
-
-    if signals['positions'].iloc[-1] == 1.0:
-        if not position:
-            qty = calculate_order_quantity(current_price)
-            try:
-                api.submit_order(
-                    symbol=symbol,
-                    qty=qty,
-                    side='buy',
-                    type='market',
-                    time_in_force='gtc',
-                    order_class='bracket',
-                    stop_loss={'stop_price': current_price * (1 - stop_loss_pct)},
-                    take_profit={'limit_price': current_price * (1 + take_profit_pct)}
-                )
-                logging.info(f"Bought {qty} shares of {symbol} at {current_price}")
-            except Exception as e:
-                logging.error(f"Error placing buy order: {e}")
-    elif signals['positions'].iloc[-1] == -1.0:
-        if position:
-            qty = position.qty
-            try:
-                api.submit_order(
-                    symbol=symbol,
-                    qty=qty,
-                    side='sell',
-                    type='market',
-                    time_in_force='gtc'
-                )
-                logging.info(f"Sold {qty} shares of {symbol} at {current_price}")
-            except Exception as e:
-                logging.error(f"Error placing sell order: {e}")
-
-def main():
-    while True:
         try:
-            end_date = datetime.now().isoformat()
-            start_date = (datetime.now() - timedelta(days=1)).isoformat()
+            if df['EMA_Short'][i] > df['EMA_Long'][i] and trade_status == "No Position":  # Buy signal
+                entry_price = df['Close'][i] * (1 + slippage_pct)
+                stop_loss = entry_price * (1 - stop_loss_factor * df['Volatility'][i])
+                trade_status = "Long"
+                print(f"Buy Signal on {df.index[i]} at {entry_price}, Position Size: {position_size}, Stop-Loss at {stop_loss}")
 
-            # Get historical data
-            data = get_historical_data(symbol, start_date, end_date)
-            if data is None:
-                continue
+            elif df['EMA_Short'][i] < df['EMA_Long'][i] and trade_status == "Long":  # Sell signal
+                exit_price = df['Close'][i] * (1 - slippage_pct)
+                profit_or_loss = (exit_price - entry_price) * position_size
+                profit_or_loss -= transaction_cost_pct * abs(profit_or_loss)
+                account_balance += profit_or_loss
+                trade_results.append(profit_or_loss)
+                trade_status = "No Position"
+                print(f"Sell Signal on {df.index[i]} at {exit_price}, Profit/Loss: {profit_or_loss}, New Balance: {account_balance}")
+                entry_price = 0
+                stop_loss = 0
 
-            data = pd.DataFrame({
-                'close': [bar.c for bar in data],
-                'date': [bar.t for bar in data]
-            }).set_index('date')
+            # Implement dynamic stop-loss
+            if trade_status == "Long" and df['Close'][i] < stop_loss:
+                exit_price = df['Close'][i] * (1 - slippage_pct)
+                profit_or_loss = (exit_price - entry_price) * position_size
+                profit_or_loss -= transaction_cost_pct * abs(profit_or_loss)
+                account_balance += profit_or_loss
+                trade_results.append(profit_or_loss)
+                trade_status = "No Position"
+                print(f"Stop-Loss Triggered on {df.index[i]} at {exit_price}, Profit/Loss: {profit_or_loss}, New Balance: {account_balance}")
+                entry_price = 0
+                stop_loss = 0
 
-            # Generate signals
-            signals = generate_signals(data)
-
-            # Execute trades based on signals
-            execute_trade(signals)
-
-            # Wait for 5 seconds before next iteration
-            time.sleep(5)
         except Exception as e:
-            logging.error(f"Error in main loop: {e}")
+            print(f"Error on {df.index[i]}: {e}")
+            continue
 
+    # Summary of trading results
+    total_trades = len(trade_results)
+    total_profit = sum(trade_results)
+    avg_profit_per_trade = np.mean(trade_results) if trade_results else 0
+    max_drawdown = (max_balance - account_balance) / max_balance
+    print(f"Total Trades: {total_trades}")
+    print(f"Total Profit/Loss: {total_profit}")
+    print(f"Final Account Balance: {account_balance}")
+    print(f"Average Profit/Loss per Trade: {avg_profit_per_trade}")
+    print(f"Maximum Drawdown: {max_drawdown}")
+
+# Example usage
 if __name__ == "__main__":
-    main()
+    ticker = 'AAPL'
+    start_date = '2023-01-01'
+    end_date = '2024-01-01'
+    df = fetch_data(ticker, start_date, end_date)
+    enhanced_trading_strategy(df)
