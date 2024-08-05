@@ -1,0 +1,188 @@
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import matplotlib.pyplot as plt
+
+# Fetch historical forex data
+def fetch_forex_data(pair, start_date, end_date, interval='1d'):
+    try:
+        df = yf.download(pair, start=start_date, end=end_date, interval=interval)
+        if df.empty:
+            raise ValueError("No data fetched, please check the pair symbol and date range.")
+        return df
+    except Exception as e:
+        print(f"Error fetching data: {e}")
+        return pd.DataFrame()
+
+# Calculate Adaptive Moving Averages
+def calculate_adaptive_moving_averages(df, short_window=20, long_window=50):
+    df['EMA_Short'] = df['Close'].ewm(span=short_window, adjust=False).mean()
+    df['EMA_Long'] = df['Close'].ewm(span=long_window, adjust=False).mean()
+    return df
+
+# Calculate Volatility
+def calculate_volatility(df, window=20):
+    df['Volatility'] = df['Close'].rolling(window=window).std()
+    return df
+
+# Enhanced Trading Strategy with Optimizations for Forex
+def enhanced_forex_trading_strategy(df, initial_account_size=100000, stop_loss_factor=1.5, base_lot_size=0.01, transaction_cost_pct=0.001, slippage_pct=0.001, max_drawdown_pct=0.2, trailing_stop_pct=0.02):
+    df = calculate_adaptive_moving_averages(df)
+    df = calculate_volatility(df)
+    
+    # Initialize trading variables
+    account_balance = initial_account_size
+    position_size = 0
+    entry_price = 0
+    stop_loss = 0
+    trade_status = "No Position"
+    trade_results = []
+    trade_log = []
+    max_balance = initial_account_size
+    trailing_stop = 0
+
+    for i in range(len(df)):
+        # Dynamic Position Sizing
+        position_size = account_balance * base_lot_size / df['Close'][i]
+        
+        # Check for max drawdown
+        if account_balance < max_balance * (1 - max_drawdown_pct):
+            print("Maximum drawdown reached. Ending trading.")
+            break
+
+        try:
+            if df['EMA_Short'][i] > df['EMA_Long'][i] and trade_status == "No Position":  # Buy signal
+                entry_price = df['Close'][i] * (1 + slippage_pct)
+                stop_loss = entry_price * (1 - stop_loss_factor * df['Volatility'][i])
+                trailing_stop = entry_price * (1 - trailing_stop_pct)  # Initial trailing stop
+                trade_status = "Long"
+                trade_log.append(f"Buy Signal on {df.index[i]} at {entry_price}, Position Size: {position_size}, Stop-Loss at {stop_loss}, Trailing Stop at {trailing_stop}")
+
+            elif df['EMA_Short'][i] < df['EMA_Long'][i] and trade_status == "Long":  # Sell signal
+                exit_price = df['Close'][i] * (1 - slippage_pct)
+                profit_or_loss = (exit_price - entry_price) * position_size
+                profit_or_loss -= transaction_cost_pct * abs(profit_or_loss)
+                account_balance += profit_or_loss
+                trade_results.append(profit_or_loss)
+                trade_status = "No Position"
+                trade_log.append(f"Sell Signal on {df.index[i]} at {exit_price}, Profit/Loss: {profit_or_loss}, New Balance: {account_balance}")
+                entry_price = 0
+                stop_loss = 0
+
+            # Implement trailing stop-loss
+            if trade_status == "Long":
+                trailing_stop = max(trailing_stop, df['Close'][i] * (1 - trailing_stop_pct))  # Update trailing stop
+                if df['Close'][i] < trailing_stop:
+                    exit_price = df['Close'][i] * (1 - slippage_pct)
+                    profit_or_loss = (exit_price - entry_price) * position_size
+                    profit_or_loss -= transaction_cost_pct * abs(profit_or_loss)
+                    account_balance += profit_or_loss
+                    trade_results.append(profit_or_loss)
+                    trade_status = "No Position"
+                    trade_log.append(f"Trailing Stop-Loss Triggered on {df.index[i]} at {exit_price}, Profit/Loss: {profit_or_loss}, New Balance: {account_balance}")
+                    entry_price = 0
+                    stop_loss = 0
+
+            # Update max balance for drawdown calculation
+            max_balance = max(max_balance, account_balance)
+
+        except Exception as e:
+            print(f"Error on {df.index[i]}: {e}")
+            continue
+
+    # Summary of trading results
+    total_trades = len(trade_results)
+    total_profit = sum(trade_results)
+    avg_profit_per_trade = np.mean(trade_results) if trade_results else 0
+    max_drawdown = (max_balance - account_balance) / max_balance
+    sharpe_ratio = np.mean(trade_results) / np.std(trade_results) if np.std(trade_results) != 0 else 0
+
+    print(f"Total Trades: {total_trades}")
+    print(f"Total Profit/Loss: {total_profit}")
+    print(f"Final Account Balance: {account_balance}")
+    print(f"Average Profit/Loss per Trade: {avg_profit_per_trade}")
+    print(f"Maximum Drawdown: {max_drawdown}")
+    print(f"Sharpe Ratio: {sharpe_ratio}")
+
+    for log in trade_log:
+        print(log)
+
+    return df, trade_results
+
+# Visualization
+def plot_trading_signals(df):
+    plt.figure(figsize=(14, 7))
+    plt.plot(df['Close'], label='Close Price')
+    plt.plot(df['EMA_Short'], label='EMA Short')
+    plt.plot(df['EMA_Long'], label='EMA Long')
+    
+    buy_signals = df[df['EMA_Short'] > df['EMA_Long']]
+    sell_signals = df[df['EMA_Short'] < df['EMA_Long']]
+    
+    plt.plot(buy_signals.index, buy_signals['Close'], '^', markersize=10, color='g', lw=0, label='Buy Signal')
+    plt.plot(sell_signals.index, sell_signals['Close'], 'v', markersize=10, color='r', lw=0, label='Sell Signal')
+    
+    plt.title('Forex Pair Price and Trading Signals')
+    plt.legend()
+    plt.show()
+
+# Optimize Parameters
+def optimize_parameters(pair, start_date, end_date, short_window_range, long_window_range, stop_loss_factors, trailing_stop_pcts):
+    best_params = {}
+    best_sharpe = -np.inf
+    
+    for short_window in short_window_range:
+        for long_window in long_window_range:
+            for stop_loss_factor in stop_loss_factors:
+                for trailing_stop_pct in trailing_stop_pcts:
+                    df = fetch_forex_data(pair, start_date, end_date)
+                    if not df.empty:
+                        df = calculate_adaptive_moving_averages(df, short_window, long_window)
+                        df, trade_results = enhanced_forex_trading_strategy(
+                            df,
+                            stop_loss_factor=stop_loss_factor,
+                            trailing_stop_pct=trailing_stop_pct
+                        )
+                        sharpe_ratio = np.mean(trade_results) / np.std(trade_results) if np.std(trade_results) != 0 else 0
+                        if sharpe_ratio > best_sharpe:
+                            best_sharpe = sharpe_ratio
+                            best_params = {
+                                'short_window': short_window,
+                                'long_window': long_window,
+                                'stop_loss_factor': stop_loss_factor,
+                                'trailing_stop_pct': trailing_stop_pct
+                            }
+    return best_params, best_sharpe
+
+# Example usage
+if __name__ == "__main__":
+    pair = 'EURUSD=X'  # Example forex pair
+    start_date = '2023-01-01'
+    end_date = '2024-01-01'
+    interval = '1d'  # You can change this to '1h' or '15m' for intraday data
+    
+    # Optimizing parameters
+    short_window_range = range(10, 31, 5)
+    long_window_range = range(30, 101, 10)
+    stop_loss_factors = [1.5, 2.0, 2.5]
+    trailing_stop_pcts = [0.01, 0.02, 0.03]
+
+    best_params, best_sharpe = optimize_parameters(
+        pair, start_date, end_date,
+        short_window_range, long_window_range,
+        stop_loss_factors, trailing_stop_pcts
+    )
+
+    print(f"Best Parameters: {best_params}")
+    print(f"Best Sharpe Ratio: {best_sharpe}")
+
+    # Fetching data and running strategy with best parameters
+    df = fetch_forex_data(pair, start_date, end_date, interval)
+    if not df.empty:
+        df = calculate_adaptive_moving_averages(df, best_params['short_window'], best_params['long_window'])
+        df, _ = enhanced_forex_trading_strategy(
+            df,
+            stop_loss_factor=best_params['stop_loss_factor'],
+            trailing_stop_pct=best_params['trailing_stop_pct']
+        )
+        plot_trading_signals(df)
