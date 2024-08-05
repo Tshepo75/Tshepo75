@@ -1,0 +1,117 @@
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import matplotlib.pyplot as plt
+
+# Fetch historical data
+def fetch_data(ticker, start_date, end_date, interval='1d'):
+    try:
+        df = yf.download(ticker, start=start_date, end=end_date, interval=interval)
+        if df.empty:
+            raise ValueError("No data fetched, please check the ticker symbol and date range.")
+        return df
+    except Exception as e:
+        print(f"Error fetching data: {e}")
+        return pd.DataFrame()
+
+# Calculate Adaptive Moving Averages
+def calculate_adaptive_moving_averages(df, short_window=20, long_window=50):
+    df['EMA_Short'] = df['Close'].ewm(span=short_window, adjust=False).mean()
+    df['EMA_Long'] = df['Close'].ewm(span=long_window, adjust=False).mean()
+    return df
+
+# Calculate Volatility
+def calculate_volatility(df, window=20):
+    df['Volatility'] = df['Close'].rolling(window=window).std()
+    return df
+
+# Trading Strategy with Enhanced Features
+def enhanced_trading_strategy(df, initial_account_size=100000, stop_loss_factor=1.5, base_lot_size=0.01, transaction_cost_pct=0.001, slippage_pct=0.001, max_drawdown_pct=0.2):
+    df = calculate_adaptive_moving_averages(df)
+    df = calculate_volatility(df)
+    
+    # Initialize trading variables
+    account_balance = initial_account_size
+    position_size = 0
+    entry_price = 0
+    stop_loss = 0
+    trade_status = "No Position"
+    trade_results = []
+    max_balance = initial_account_size
+
+    for i in range(len(df)):
+        # Dynamic Position Sizing
+        position_size = account_balance * base_lot_size / df['Close'][i]
+        
+        # Check for max drawdown
+        if account_balance < max_balance * (1 - max_drawdown_pct):
+            print("Maximum drawdown reached. Ending trading.")
+            break
+
+        try:
+            if df['EMA_Short'][i] > df['EMA_Long'][i] and trade_status == "No Position":  # Buy signal
+                entry_price = df['Close'][i] * (1 + slippage_pct)
+                stop_loss = entry_price * (1 - stop_loss_factor * df['Volatility'][i])
+                trade_status = "Long"
+                print(f"Buy Signal on {df.index[i]} at {entry_price}, Position Size: {position_size}, Stop-Loss at {stop_loss}")
+
+            elif df['EMA_Short'][i] < df['EMA_Long'][i] and trade_status == "Long":  # Sell signal
+                exit_price = df['Close'][i] * (1 - slippage_pct)
+                profit_or_loss = (exit_price - entry_price) * position_size
+                profit_or_loss -= transaction_cost_pct * abs(profit_or_loss)
+                account_balance += profit_or_loss
+                trade_results.append(profit_or_loss)
+                trade_status = "No Position"
+                print(f"Sell Signal on {df.index[i]} at {exit_price}, Profit/Loss: {profit_or_loss}, New Balance: {account_balance}")
+                entry_price = 0
+                stop_loss = 0
+
+            # Implement dynamic stop-loss
+            if trade_status == "Long" and df['Close'][i] < stop_loss:
+                exit_price = df['Close'][i] * (1 - slippage_pct)
+                profit_or_loss = (exit_price - entry_price) * position_size
+                profit_or_loss -= transaction_cost_pct * abs(profit_or_loss)
+                account_balance += profit_or_loss
+                trade_results.append(profit_or_loss)
+                trade_status = "No Position"
+                print(f"Stop-Loss Triggered on {df.index[i]} at {exit_price}, Profit/Loss: {profit_or_loss}, New Balance: {account_balance}")
+                entry_price = 0
+                stop_loss = 0
+
+        except Exception as e:
+            print(f"Error on {df.index[i]}: {e}")
+            continue
+
+    # Summary of trading results
+    total_trades = len(trade_results)
+    total_profit = sum(trade_results)
+    avg_profit_per_trade = np.mean(trade_results) if trade_results else 0
+    max_drawdown = (max_balance - account_balance) / max_balance
+    print(f"Total Trades: {total_trades}")
+    print(f"Total Profit/Loss: {total_profit}")
+    print(f"Final Account Balance: {account_balance}")
+    print(f"Average Profit/Loss per Trade: {avg_profit_per_trade}")
+    print(f"Maximum Drawdown: {max_drawdown}")
+
+    return df
+
+# Visualization
+def plot_trading_signals(df):
+    plt.figure(figsize=(14, 7))
+    plt.plot(df['Close'], label='Close Price')
+    plt.plot(df['EMA_Short'], label='EMA Short')
+    plt.plot(df['EMA_Long'], label='EMA Long')
+    plt.title('Stock Price and Trading Signals')
+    plt.legend()
+    plt.show()
+
+# Example usage
+if __name__ == "__main__":
+    ticker = '^IXIC'  # NASDAQ Composite Index
+    start_date = '2023-01-01'
+    end_date = '2024-01-01'
+    interval = '1d'  # You can change this to '1h' or '15m' for intraday data
+    df = fetch_data(ticker, start_date, end_date, interval)
+    if not df.empty:
+        df = enhanced_trading_strategy(df)
+        plot_trading_signals(df)
